@@ -109,6 +109,7 @@ configure_vault() {
 
   log "Vault configuration completed."
   log "AppRole role_id stored in /vault/init/app-role-id"
+  touch /vault/init/configured
 }
 
 wait_for_freeipa() {
