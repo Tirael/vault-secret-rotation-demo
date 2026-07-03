@@ -1,7 +1,10 @@
 using Microsoft.Extensions.Options;
 using Npgsql;
+using Polly;
+using Polly.Registry;
 using PostgresVaultService.Models;
 using PostgresVaultService.Options;
+using PostgresVaultService.Resilience;
 
 namespace PostgresVaultService.Services;
 
@@ -12,6 +15,7 @@ public sealed class DynamicPostgresConnectionFactory : IHostedService, IDisposab
     private readonly IVaultSecretProvider _vaultSecretProvider;
     private readonly PostgresOptions _postgresOptions;
     private readonly VaultOptions _vaultOptions;
+    private readonly ResiliencePipeline _postgresPipeline;
     private readonly ILogger<DynamicPostgresConnectionFactory> _logger;
 
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
@@ -25,11 +29,13 @@ public sealed class DynamicPostgresConnectionFactory : IHostedService, IDisposab
         IVaultSecretProvider vaultSecretProvider,
         IOptions<PostgresOptions> postgresOptions,
         IOptions<VaultOptions> vaultOptions,
+        ResiliencePipelineProvider<string> pipelineProvider,
         ILogger<DynamicPostgresConnectionFactory> logger)
     {
         _vaultSecretProvider = vaultSecretProvider;
         _postgresOptions = postgresOptions.Value;
         _vaultOptions = vaultOptions.Value;
+        _postgresPipeline = pipelineProvider.GetPipeline(ResiliencePipelineNames.PostgresOperation);
         _logger = logger;
     }
 
@@ -81,7 +87,9 @@ public sealed class DynamicPostgresConnectionFactory : IHostedService, IDisposab
 
             try
             {
-                return await dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                return await _postgresPipeline.ExecuteAsync(
+                    async token => await dataSource.OpenConnectionAsync(token).ConfigureAwait(false),
+                    cancellationToken).ConfigureAwait(false);
             }
             catch (PostgresException ex) when (ex.SqlState is "28P01" or "28000")
             {

@@ -1,6 +1,9 @@
 using Microsoft.Extensions.Options;
+using Polly;
+using Polly.Registry;
 using PostgresVaultService.Models;
 using PostgresVaultService.Options;
+using PostgresVaultService.Resilience;
 using VaultSharp;
 using VaultSharp.V1.AuthMethods.AppRole;
 
@@ -9,21 +12,29 @@ namespace PostgresVaultService.Services;
 public sealed class VaultSecretProvider : IVaultSecretProvider
 {
     private readonly VaultOptions _options;
+    private readonly ResiliencePipeline _vaultPipeline;
     private readonly ILogger<VaultSecretProvider> _logger;
     private readonly SemaphoreSlim _clientLock = new(1, 1);
 
     private IVaultClient? _client;
 
-    public VaultSecretProvider(IOptions<VaultOptions> options, ILogger<VaultSecretProvider> logger)
+    public VaultSecretProvider(
+        IOptions<VaultOptions> options,
+        ResiliencePipelineProvider<string> pipelineProvider,
+        ILogger<VaultSecretProvider> logger)
     {
         _options = options.Value;
+        _vaultPipeline = pipelineProvider.GetPipeline(ResiliencePipelineNames.VaultCredentials);
         _logger = logger;
     }
 
-    public async Task<PostgresCredentials> GetCredentialsAsync(CancellationToken cancellationToken)
-    {
-        _ = cancellationToken;
+    public async Task<PostgresCredentials> GetCredentialsAsync(CancellationToken cancellationToken) =>
+        await _vaultPipeline.ExecuteAsync(
+            async token => await ReadCredentialsCoreAsync(token).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
 
+    private async Task<PostgresCredentials> ReadCredentialsCoreAsync(CancellationToken cancellationToken)
+    {
         var client = await GetAuthenticatedClientAsync().ConfigureAwait(false);
         var secret = await client.V1.Secrets.Database
             .GetStaticCredentialsAsync(_options.StaticRoleName, _options.DatabaseMountPoint)

@@ -1,5 +1,8 @@
 using Microsoft.Extensions.Options;
+using Polly;
+using Polly.Registry;
 using PostgresVaultService.Options;
+using PostgresVaultService.Resilience;
 
 namespace PostgresVaultService.Services;
 
@@ -7,15 +10,18 @@ public sealed class InsertWorker : BackgroundService
 {
     private readonly DynamicPostgresConnectionFactory _connectionFactory;
     private readonly PostgresOptions _options;
+    private readonly ResiliencePipeline _postgresPipeline;
     private readonly ILogger<InsertWorker> _logger;
 
     public InsertWorker(
         DynamicPostgresConnectionFactory connectionFactory,
         IOptions<PostgresOptions> options,
+        ResiliencePipelineProvider<string> pipelineProvider,
         ILogger<InsertWorker> logger)
     {
         _connectionFactory = connectionFactory;
         _options = options.Value;
+        _postgresPipeline = pipelineProvider.GetPipeline(ResiliencePipelineNames.PostgresOperation);
         _logger = logger;
     }
 
@@ -29,11 +35,17 @@ public sealed class InsertWorker : BackgroundService
         {
             try
             {
-                await InsertHeartbeatAsync(stoppingToken).ConfigureAwait(false);
+                await _postgresPipeline.ExecuteAsync(
+                    async token => await InsertHeartbeatAsync(token).ConfigureAwait(false),
+                    stoppingToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
-                _logger.LogError(ex, "Insert failed. Retrying on next tick.");
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Insert failed after resilience pipeline retries. Retrying on next tick.");
             }
 
             try

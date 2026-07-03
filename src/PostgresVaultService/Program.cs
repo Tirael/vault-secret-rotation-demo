@@ -1,10 +1,12 @@
 using PostgresVaultService.Options;
+using PostgresVaultService.Resilience;
 using PostgresVaultService.Services;
 
 var builder = Host.CreateApplicationBuilder(args);
 
 builder.Services.Configure<VaultOptions>(builder.Configuration.GetSection(VaultOptions.SectionName));
 builder.Services.Configure<PostgresOptions>(builder.Configuration.GetSection(PostgresOptions.SectionName));
+builder.Services.AddApplicationResiliencePipelines(builder.Configuration);
 
 builder.Services.AddSingleton<IVaultSecretProvider, VaultSecretProvider>();
 builder.Services.AddSingleton<DynamicPostgresConnectionFactory>();
