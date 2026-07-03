@@ -1,0 +1,26 @@
+dn: ou=users,dc=demo,dc=local
+objectClass: organizationalUnit
+ou: users
+
+dn: ou=groups,dc=demo,dc=local
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=admin,ou=users,dc=demo,dc=local
+objectClass: inetOrgPerson
+objectClass: organizationalPerson
+objectClass: person
+cn: Admin
+sn: User
+uid: admin
+userPassword: Secret123!
+
+dn: cn=admins,ou=groups,dc=demo,dc=local
+objectClass: groupOfNames
+cn: admins
+member: uid=admin,ou=users,dc=demo,dc=local
+
+dn: cn=ipausers,ou=groups,dc=demo,dc=local
+objectClass: groupOfNames
+cn: ipausers
+member: uid=admin,ou=users,dc=demo,dc=local

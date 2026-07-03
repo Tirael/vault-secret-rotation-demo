@@ -1,0 +1,9 @@
+FROM hashicorp/vault:1.19
+
+USER root
+RUN apk add --no-cache bash curl jq openldap-clients
+
+COPY scripts/vault-init.sh /usr/local/bin/vault-init.sh
+RUN chmod +x /usr/local/bin/vault-init.sh
+
+ENTRYPOINT ["/usr/local/bin/vault-init.sh"]
