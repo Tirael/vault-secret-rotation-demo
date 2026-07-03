@@ -1,6 +1,6 @@
 # PostgresVaultService
 
-Демонстрационный стек: **.NET 10 + Npgsql + PostgreSQL 18 + HashiCorp Vault + FreeIPA (AD/LDAP)** с автоматической почасовой ротацией пароля технологической учётной записи и бесшовным переподключением сервиса.
+Демонстрационный стек: **.NET 10 + Npgsql + PostgreSQL 18 + HashiCorp Vault + FreeIPA (AD/LDAP)** с автоматической почасовой ротацией пароля технологической учётной записи средствами **Vault Database Secrets Engine** и бесшовным переподключением сервиса.
 
 ## Архитектура
 
@@ -11,8 +11,7 @@ flowchart LR
     end
 
     subgraph Secrets
-        V[HashiCorp Vault<br/>KV v2 + LDAP auth + AppRole]
-        R[Secret Rotator<br/>cron: каждый час]
+        V[HashiCorp Vault<br/>Database Engine + LDAP + AppRole]
     end
 
     subgraph Data
@@ -24,9 +23,8 @@ flowchart LR
     end
 
     IPA -->|LDAP login для операторов| V
-    R -->|ALTER ROLE + kv put| PG
-    R -->|обновление секрета| V
-    S -->|AppRole read secret| V
+    V -->|static role rotation 1h<br/>ALTER USER| PG
+    S -->|read database/static-creds| V
     S -->|INSERT heartbeat| PG
 ```
 
@@ -36,23 +34,22 @@ flowchart LR
 |--------|------------|
 | `freeipa` | AD-совместимый каталог (LDAP/Kerberos) для аутентификации операторов в Vault |
 | `postgres` | PostgreSQL 18, БД `appdb`, технический пользователь `app_tech` |
-| `vault` | Хранение секрета `secret/postgresql/app_tech` |
-| `vault-init` | Одноразовая инициализация Vault: KV, LDAP, AppRole, политики |
-| `rotator` | Почасовая ротация пароля `app_tech` в PostgreSQL и Vault |
-| `app` | .NET Worker: читает секрет из Vault, выполняет регулярные INSERT |
+| `vault` | Database Secrets Engine, static role `app-tech`, LDAP auth, AppRole |
+| `vault-init` | Одноразовая инициализация Vault: database engine, static role, LDAP, AppRole |
+| `app` | .NET Worker: читает credentials из Vault, выполняет регулярные INSERT |
 
 ### Ротация и бесшовное переподключение
 
-1. **Rotator** (каждый час и при старте):
+1. **Vault Database Secrets Engine** (static role `app-tech`, `rotation_period=1h`):
    - генерирует новый пароль;
-   - выполняет `ALTER ROLE app_tech WITH PASSWORD ...` в PostgreSQL;
-   - записывает секрет в Vault (`secret/postgresql/app_tech`).
+   - выполняет `ALTER USER app_tech WITH PASSWORD ...` в PostgreSQL;
+   - сохраняет пароль внутри Vault (атомарный цикл, без внешнего ротатора).
 
 2. **.NET сервис**:
-   - опрашивает Vault каждые 15 секунд (настраивается);
+   - читает `database/static-creds/app-tech` каждые 15 секунд;
    - при изменении пароля создаёт новый `NpgsqlDataSource`;
    - старый пул соединений выводится из эксплуатации с задержкой 60 секунд;
-   - при ошибке аутентификации (`28P01`/`28000`) принудительно обновляет секрет и повторяет подключение.
+   - при ошибке аутентификации (`28P01`/`28000`) принудительно обновляет credentials и повторяет подключение.
 
 ## Быстрый старт
 
@@ -74,7 +71,7 @@ docker compose up --build -d
 ```bash
 docker compose ps
 docker compose logs -f app
-docker compose logs -f rotator
+docker compose logs -f vault-init
 ```
 
 ### Проверка вставок в PostgreSQL
@@ -87,8 +84,11 @@ docker compose exec postgres psql -U postgres -d appdb -c \
 ### Проверка ротации
 
 ```bash
-# Принудительная ротация
-docker compose exec rotator /usr/local/bin/rotate-password.sh
+# Принудительная ротация через Vault
+docker compose exec vault vault write -f database/rotate-role/app-tech
+
+# Текущие credentials
+docker compose exec vault vault read database/static-creds/app-tech
 
 # Логи сервиса — должен появиться "PostgreSQL credentials refreshed"
 docker compose logs --tail=50 app
@@ -110,7 +110,7 @@ docker compose exec vault vault login -method=ldap username=admin
 # пароль: значение FREEIPA_ADMIN_PASSWORD (по умолчанию Secret123!)
 ```
 
-Группы FreeIPA `admins` и `ipausers` получают политику `ldap-users` (чтение секретов PostgreSQL).
+Группы FreeIPA `admins` и `ipausers` получают политику `ldap-users` (чтение `database/static-creds/app-tech`).
 
 Сервис приложения использует **AppRole** (машинная аутентификация) — это стандартная практика для автоматизированных workload.
 
@@ -127,6 +127,7 @@ dotnet run --project src/PostgresVaultService
 
 ```bash
 export Vault__Address=http://localhost:8200
+export Vault__StaticRoleName=app-tech
 export Vault__RoleId=$(docker compose exec vault cat /vault/init/app-role-id)
 export Vault__SecretId=$(docker compose exec vault cat /vault/init/app-secret-id)
 ```
@@ -138,8 +139,7 @@ export Vault__SecretId=$(docker compose exec vault cat /vault/init/app-secret-id
 ├── .env.example
 ├── docker/
 │   ├── postgres/init/01-init.sql
-│   ├── vault/                  # config, policies, init Dockerfile
-│   └── rotator/                # скрипт почасовой ротации
+│   └── vault/                  # config, policies, init Dockerfile
 ├── scripts/vault-init.sh
 └── src/PostgresVaultService/   # .NET 10 Worker
     ├── Services/
@@ -153,12 +153,13 @@ export Vault__SecretId=$(docker compose exec vault cat /vault/init/app-secret-id
 
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
-| `POSTGRES_ADMIN_PASSWORD` | `postgres-admin-secret` | Пароль суперпользователя PostgreSQL |
+| `POSTGRES_ADMIN_PASSWORD` | `postgres-admin-secret` | Пароль суперпользователя PostgreSQL (для Vault database config) |
 | `FREEIPA_ADMIN_PASSWORD` | `Secret123!` | Пароль admin FreeIPA |
+| `ROTATION_PERIOD` | `1h` | Период ротации static role в Vault |
 | `Vault__PollIntervalSeconds` | `15` | Интервал опроса Vault (сек) |
 | `Postgres__InsertIntervalSeconds` | `5` | Интервал INSERT (сек) |
 
-Расписание ротации задаётся в `docker/rotator/entrypoint.sh` (`0 * * * *` — каждый час).
+Расписание ротации задаётся в `scripts/vault-init.sh` через `ROTATION_PERIOD` (или `rotation_schedule` для cron-формата в Vault).
 
 ## Остановка и очистка
 
@@ -168,13 +169,15 @@ docker compose down
 docker compose down -v
 ```
 
+> При переходе со старой версии (KV + rotator) необходимо `docker compose down -v` для пересоздания Vault и PostgreSQL.
+
 ## Безопасность (production)
 
 Это демонстрационный стек. Для production рекомендуется:
 
 - включить TLS для Vault, PostgreSQL и LDAP;
 - использовать Vault HA + auto-unseal (KMS/HSM);
-- заменить file storage Vault на Consul/Raft HA;
+- заменить file storage Vault на integrated storage (Raft) в HA-режиме;
 - ограничить AppRole политиками least-privilege;
 - настроить аудит Vault и PostgreSQL;
-- использовать Vault Database Secrets Engine вместо shell-ротатора (опционально).
+- использовать отдельный privileged-аккаунт PostgreSQL только для Vault (не `app_tech`).

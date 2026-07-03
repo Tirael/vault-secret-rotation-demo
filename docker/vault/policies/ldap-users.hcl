@@ -2,6 +2,6 @@ path "auth/ldap/login/*" {
   capabilities = ["create", "read"]
 }
 
-path "secret/data/postgresql/*" {
+path "database/static-creds/app-tech" {
   capabilities = ["read"]
 }

@@ -3,7 +3,6 @@ using PostgresVaultService.Models;
 using PostgresVaultService.Options;
 using VaultSharp;
 using VaultSharp.V1.AuthMethods.AppRole;
-using VaultSharp.V1.Commons;
 
 namespace PostgresVaultService.Services;
 
@@ -26,17 +25,19 @@ public sealed class VaultSecretProvider : IVaultSecretProvider
         _ = cancellationToken;
 
         var client = await GetAuthenticatedClientAsync().ConfigureAwait(false);
-        var secret = await client.V1.Secrets.KeyValue.V2
-            .ReadSecretAsync(
-                NormalizeSecretPath(_options.SecretPath),
-                mountPoint: "secret")
+        var secret = await client.V1.Secrets.Database
+            .GetStaticCredentialsAsync(_options.StaticRoleName, _options.DatabaseMountPoint)
             .ConfigureAwait(false);
 
-        var data = secret.Data.Data;
-        var username = GetRequiredValue(data, "username");
-        var password = GetRequiredValue(data, "password");
+        var data = secret.Data
+            ?? throw new InvalidOperationException("Vault returned empty static credentials.");
 
-        return new PostgresCredentials(username, password);
+        if (string.IsNullOrWhiteSpace(data.Username) || string.IsNullOrWhiteSpace(data.Password))
+        {
+            throw new InvalidOperationException("Vault static credentials are missing username or password.");
+        }
+
+        return new PostgresCredentials(data.Username, data.Password);
     }
 
     private async Task<IVaultClient> GetAuthenticatedClientAsync()
@@ -67,24 +68,6 @@ public sealed class VaultSecretProvider : IVaultSecretProvider
         {
             _clientLock.Release();
         }
-    }
-
-    private static string NormalizeSecretPath(string secretPath)
-    {
-        const string prefix = "secret/data/";
-        return secretPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? secretPath[prefix.Length..]
-            : secretPath;
-    }
-
-    private static string GetRequiredValue(IDictionary<string, object> data, string key)
-    {
-        if (!data.TryGetValue(key, out var value) || value is null)
-        {
-            throw new InvalidOperationException($"Vault secret is missing required field '{key}'.");
-        }
-
-        return Convert.ToString(value) ?? throw new InvalidOperationException($"Vault secret field '{key}' is empty.");
     }
 }
 

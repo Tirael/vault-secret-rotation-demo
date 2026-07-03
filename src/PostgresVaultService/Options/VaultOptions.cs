@@ -10,7 +10,9 @@ public sealed class VaultOptions
 
     public string SecretId { get; set; } = string.Empty;
 
-    public string SecretPath { get; set; } = "secret/data/postgresql/app_tech";
+    public string DatabaseMountPoint { get; set; } = "database";
+
+    public string StaticRoleName { get; set; } = "app-tech";
 
     public int PollIntervalSeconds { get; set; } = 15;
 }

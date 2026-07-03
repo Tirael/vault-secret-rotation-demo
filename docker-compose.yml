@@ -82,8 +82,10 @@ services:
     environment:
       VAULT_ADDR: http://vault:8200
       FREEIPA_ADMIN_PASSWORD: ${FREEIPA_ADMIN_PASSWORD:-Secret123!}
+      POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres-admin-secret}
       TECH_USER: app_tech
-      INITIAL_TECH_PASSWORD: ChangeMe_OnFirstRotation!
+      STATIC_ROLE: app-tech
+      ROTATION_PERIOD: 1h
     volumes:
       - ./docker/vault/policies:/vault/policies:ro
       - vault-init-data:/vault/init
@@ -99,32 +101,6 @@ services:
       demo-net:
     restart: "no"
 
-  rotator:
-    <<: *restart-unless-stopped
-    build:
-      context: .
-      dockerfile: docker/rotator/Dockerfile
-    container_name: secret-rotator
-    environment:
-      VAULT_ADDR: http://vault:8200
-      VAULT_TOKEN_FILE: /vault/init/rotator-token
-      PGHOST: postgres
-      PGPORT: 5432
-      PGDATABASE: postgres
-      PGUSER: postgres
-      PGPASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres-admin-secret}
-      TECH_USER: app_tech
-      SECRET_PATH: secret/data/postgresql/app_tech
-    volumes:
-      - vault-init-data:/vault/init:ro
-    depends_on:
-      vault-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-    networks:
-      demo-net:
-
   app:
     <<: *restart-unless-stopped
     build:
@@ -134,7 +110,8 @@ services:
     entrypoint: ["/bin/sh", "/app/docker-entrypoint.sh"]
     environment:
       Vault__Address: http://vault:8200
-      Vault__SecretPath: secret/data/postgresql/app_tech
+      Vault__DatabaseMountPoint: database
+      Vault__StaticRoleName: app-tech
       Vault__PollIntervalSeconds: 15
       Postgres__Host: postgres
       Postgres__Port: 5432
@@ -149,8 +126,6 @@ services:
     depends_on:
       vault-init:
         condition: service_completed_successfully
-      rotator:
-        condition: service_started
       postgres:
         condition: service_healthy
     networks:

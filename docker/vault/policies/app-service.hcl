@@ -1,3 +1,3 @@
-path "secret/data/postgresql/*" {
+path "database/static-creds/app-tech" {
   capabilities = ["read"]
 }

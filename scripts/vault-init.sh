@@ -4,6 +4,10 @@ set -eu
 VAULT_ADDR="${VAULT_ADDR:-http://vault:8200}"
 VAULT_INIT_FILE="${VAULT_INIT_FILE:-/vault/init/root-token}"
 MAX_ATTEMPTS=60
+POSTGRES_ADMIN_PASSWORD="${POSTGRES_ADMIN_PASSWORD:-postgres-admin-secret}"
+TECH_USER="${TECH_USER:-app_tech}"
+STATIC_ROLE="${STATIC_ROLE:-app-tech}"
+ROTATION_PERIOD="${ROTATION_PERIOD:-1h}"
 
 log() {
   printf '[vault-init] %s\n' "$*"
@@ -55,8 +59,28 @@ configure_vault() {
 
   vault secrets enable -path=secret kv-v2 2>/dev/null || true
 
+  if ! vault secrets list -format=json | jq -e '.["database/"]' >/dev/null; then
+    vault secrets enable database
+  fi
+
+  vault write database/config/postgresql \
+    plugin_name=postgresql-database-plugin \
+    allowed_roles="*" \
+    verify_connection=true \
+    connection_url="postgresql://{{username}}:{{password}}@postgres:5432/postgres?sslmode=disable" \
+    username="postgres" \
+    password="${POSTGRES_ADMIN_PASSWORD}"
+
+  vault write "database/static-roles/${STATIC_ROLE}" \
+    db_name=postgresql \
+    username="${TECH_USER}" \
+    rotation_period="${ROTATION_PERIOD}" \
+    rotation_statements="ALTER USER \"{{name}}\" WITH PASSWORD '{{password}}';"
+
+  log "Triggering initial static role rotation for ${TECH_USER}..."
+  vault read -format=json "database/static-creds/${STATIC_ROLE}" >/dev/null
+
   vault policy write app-service /vault/policies/app-service.hcl
-  vault policy write rotator /vault/policies/rotator.hcl
   vault policy write ldap-users /vault/policies/ldap-users.hcl
 
   if ! vault auth list -format=json | jq -e '.["approle/"]' >/dev/null; then
@@ -94,20 +118,8 @@ configure_vault() {
   vault write auth/ldap/groups/admins policies=ldap-users
   vault write auth/ldap/groups/ipausers policies=ldap-users
 
-  vault write auth/token/roles/rotator \
-    allowed_policies=rotator \
-    orphan=true \
-    period=24h \
-    renewable=true
-
-  ROTATOR_TOKEN="$(vault token create -role=rotator -format=json | jq -r '.auth.client_token')"
-  echo "${ROTATOR_TOKEN}" > /vault/init/rotator-token
-
-  vault kv put secret/postgresql/app_tech \
-    username="${TECH_USER:-app_tech}" \
-    password="${INITIAL_TECH_PASSWORD:-ChangeMe_OnFirstRotation!}"
-
   log "Vault configuration completed."
+  log "Database static role: database/static-creds/${STATIC_ROLE}"
   log "AppRole role_id stored in /vault/init/app-role-id"
   touch /vault/init/configured
 }
