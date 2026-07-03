@@ -16,7 +16,7 @@ log() {
 wait_for_vault() {
   attempt=1
   while [ "${attempt}" -le "${MAX_ATTEMPTS}" ]; do
-    if curl -fsS "${VAULT_ADDR}/v1/sys/health" >/dev/null 2>&1; then
+    if curl -fsS "${VAULT_ADDR}/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200" >/dev/null 2>&1; then
       return 0
     fi
     log "Waiting for Vault (${attempt}/${MAX_ATTEMPTS})..."
@@ -49,6 +49,14 @@ init_vault() {
   export VAULT_TOKEN="${ROOT_TOKEN}"
 }
 
+configure_ldap_directory() {
+  log "Bootstrapping LDAP users and groups..."
+  ldapadd -x -H "ldap://${LDAP_HOST:-ldap}:389" \
+    -D "cn=admin,dc=demo,dc=local" \
+    -w "${FREEIPA_ADMIN_PASSWORD}" \
+    -f /bootstrap/10-users-groups.ldif >/dev/null 2>&1 || true
+}
+
 configure_vault() {
   if [ -f /vault/init/configured ]; then
     log "Vault already configured. Skipping."
@@ -67,7 +75,7 @@ configure_vault() {
     plugin_name=postgresql-database-plugin \
     allowed_roles="*" \
     verify_connection=true \
-    connection_url="postgresql://{{username}}:{{password}}@postgres:5432/postgres?sslmode=disable" \
+    connection_url="postgresql://{{username}}:{{password}}@${PGHOST:-127.0.0.1}:5432/postgres?sslmode=disable" \
     username="postgres" \
     password="${POSTGRES_ADMIN_PASSWORD}"
 
@@ -106,11 +114,11 @@ configure_vault() {
   fi
 
   vault write auth/ldap/config \
-    url="ldap://freeipa:389" \
-    binddn="uid=admin,cn=users,cn=accounts,dc=demo,dc=local" \
+    url="ldap://${LDAP_HOST:-ldap}:389" \
+    binddn="cn=admin,dc=demo,dc=local" \
     bindpass="${FREEIPA_ADMIN_PASSWORD}" \
-    userdn="cn=users,cn=accounts,dc=demo,dc=local" \
-    groupdn="cn=groups,cn=accounts,dc=demo,dc=local" \
+    userdn="ou=users,dc=demo,dc=local" \
+    groupdn="ou=groups,dc=demo,dc=local" \
     userattr="uid" \
     upndomain="demo.local" \
     insecure_tls=true
@@ -124,17 +132,17 @@ configure_vault() {
   touch /vault/init/configured
 }
 
-wait_for_freeipa() {
+wait_for_ldap() {
   attempt=1
-  while [ "${attempt}" -le 120 ]; do
-    if ldapsearch -x -H ldap://freeipa:389 -b "dc=demo,dc=local" -s base "(objectclass=*)" >/dev/null 2>&1; then
+  while [ "${attempt}" -le 60 ]; do
+    if ldapsearch -x -H "ldap://${LDAP_HOST:-ldap}:389" -b '' -s base '(objectclass=*)' namingContexts 2>/dev/null | grep -q 'dc=demo,dc=local'; then
       return 0
     fi
-    log "Waiting for FreeIPA LDAP (${attempt}/120)..."
+    log "Waiting for LDAP (${attempt}/60)..."
     sleep 5
     attempt=$((attempt + 1))
   done
-  log "FreeIPA LDAP did not become ready in time."
+  log "LDAP did not become ready in time."
   return 1
 }
 
@@ -142,7 +150,8 @@ main() {
   export VAULT_ADDR="${VAULT_ADDR:-http://vault:8200}"
   wait_for_vault
   init_vault
-  wait_for_freeipa || log "Continuing without confirmed FreeIPA readiness."
+  wait_for_ldap || log "Continuing without confirmed LDAP readiness."
+  configure_ldap_directory
   configure_vault
   log "Init container finished successfully."
 }

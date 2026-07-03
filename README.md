@@ -1,13 +1,13 @@
 # PostgresVaultService
 
-Демонстрационный стек: **.NET 10 + Npgsql + PostgreSQL 18 + HashiCorp Vault + FreeIPA (AD/LDAP)** с автоматической почасовой ротацией пароля технологической учётной записи средствами **Vault Database Secrets Engine** и бесшовным переподключением сервиса.
+Демонстрационный стек: **.NET 10 + Npgsql + PostgreSQL 18 + HashiCorp Vault + OpenLDAP (AD/LDAP)** с автоматической почасовой ротацией пароля технологической учётной записи средствами **Vault Database Secrets Engine** и бесшовным переподключением сервиса.
 
 ## Архитектура
 
 ```mermaid
 flowchart LR
     subgraph Identity
-        IPA[FreeIPA<br/>LDAP/Kerberos]
+        LDAP[OpenLDAP<br/>AD-совместимый LDAP]
     end
 
     subgraph Secrets
@@ -19,10 +19,10 @@ flowchart LR
     end
 
     subgraph App
-        S[.NET 10 Worker<br/>Npgsql]
+        S[.NET 10 Worker<br/>Npgsql + Resilience Pipeline]
     end
 
-    IPA -->|LDAP login для операторов| V
+    LDAP -->|LDAP login для операторов| V
     V -->|static role rotation 1h<br/>ALTER USER| PG
     S -->|read database/static-creds| V
     S -->|INSERT heartbeat| PG
@@ -32,11 +32,13 @@ flowchart LR
 
 | Сервис | Назначение |
 |--------|------------|
-| `freeipa` | AD-совместимый каталог (LDAP/Kerberos) для аутентификации операторов в Vault |
+| `ldap` | AD-совместимый LDAP-каталог для аутентификации операторов в Vault |
 | `postgres` | PostgreSQL 18, БД `appdb`, технический пользователь `app_tech` |
 | `vault` | Database Secrets Engine, static role `app-tech`, LDAP auth, AppRole |
 | `vault-init` | Одноразовая инициализация Vault: database engine, static role, LDAP, AppRole |
 | `app` | .NET Worker: читает credentials из Vault, выполняет регулярные INSERT |
+
+> **Примечание:** вместо FreeIPA используется OpenLDAP — тот же протокол LDAP, который Vault использует для AD-интеграции. FreeIPA требует privileged/systemd и часто не стартует в ограниченных Docker-средах.
 
 ### Ротация и бесшовное переподключение
 
@@ -57,8 +59,8 @@ flowchart LR
 ### Требования
 
 - Docker 24+ и Docker Compose v2
-- ≥ 4 GB RAM (FreeIPA требует ресурсов, первый запуск может занять 5–10 минут)
-- Порты: `5432`, `8200`, `8389`, `8080`, `8443`
+- Linux-хост (стек использует `network_mode: host` для стабильной связности между контейнерами)
+- Порты на хосте: `389`, `5432`, `8200`
 
 ### Запуск
 
@@ -71,14 +73,18 @@ docker compose up --build -d
 
 ```bash
 docker compose ps
+docker compose logs vault-init
 docker compose logs -f app
-docker compose logs -f vault-init
 ```
+
+Ожидаемый результат `docker compose ps`:
+- `ldap`, `postgres`, `vault`, `app` — **Up**
+- `vault-init` — **Exited (0)**
 
 ### Проверка вставок в PostgreSQL
 
 ```bash
-docker compose exec postgres psql -U postgres -d appdb -c \
+docker compose exec postgres psql -U postgres -d appdb -h 127.0.0.1 -c \
   "SELECT id, event_type, created_at FROM app_events ORDER BY id DESC LIMIT 10;"
 ```
 
@@ -95,25 +101,25 @@ docker compose exec vault vault read database/static-creds/app-tech
 docker compose logs --tail=50 app
 ```
 
-## Интеграция с FreeIPA (AD)
+## Интеграция с LDAP (AD)
 
-Vault настроен на LDAP-аутентификацию через FreeIPA:
+Vault настроен на LDAP-аутентификацию через OpenLDAP:
 
-- **URL:** `ldap://freeipa:389`
+- **URL:** `ldap://127.0.0.1:389`
 - **Домен:** `demo.local`
 - **Администратор:** `admin` / пароль из `FREEIPA_ADMIN_PASSWORD`
 
 Вход оператора в Vault через LDAP:
 
 ```bash
-export VAULT_ADDR=http://localhost:8200
+export VAULT_ADDR=http://127.0.0.1:8200
 docker compose exec vault vault login -method=ldap username=admin
 # пароль: значение FREEIPA_ADMIN_PASSWORD (по умолчанию Secret123!)
 ```
 
-Группы FreeIPA `admins` и `ipausers` получают политику `ldap-users` (чтение `database/static-creds/app-tech`).
+Группы `admins` и `ipausers` получают политику `ldap-users` (чтение `database/static-creds/app-tech`).
 
-Сервис приложения использует **AppRole** (машинная аутентификация) — это стандартная практика для автоматизированных workload.
+Сервис приложения использует **AppRole** (машинная аутентификация).
 
 ## Локальная разработка (.NET)
 
@@ -127,10 +133,11 @@ dotnet run --project src/PostgresVaultService
 Переменные окружения для локального запуска (после `docker compose up`):
 
 ```bash
-export Vault__Address=http://localhost:8200
+export Vault__Address=http://127.0.0.1:8200
 export Vault__StaticRoleName=app-tech
 export Vault__RoleId=$(docker compose exec vault cat /vault/init/app-role-id)
 export Vault__SecretId=$(docker compose exec vault cat /vault/init/app-secret-id)
+export Postgres__Host=127.0.0.1
 ```
 
 ## Структура проекта
@@ -140,13 +147,12 @@ export Vault__SecretId=$(docker compose exec vault cat /vault/init/app-secret-id
 ├── .env.example
 ├── docker/
 │   ├── postgres/init/01-init.sql
+│   ├── openldap/bootstrap/
 │   └── vault/                  # config, policies, init Dockerfile
 ├── scripts/vault-init.sh
 └── src/PostgresVaultService/   # .NET 10 Worker
+    ├── Resilience/             # Resilience Pipeline (Polly)
     ├── Services/
-    │   ├── VaultSecretProvider.cs
-    │   ├── DynamicPostgresConnectionFactory.cs
-    │   └── InsertWorker.cs
     └── ...
 ```
 
@@ -155,12 +161,21 @@ export Vault__SecretId=$(docker compose exec vault cat /vault/init/app-secret-id
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
 | `POSTGRES_ADMIN_PASSWORD` | `postgres-admin-secret` | Пароль суперпользователя PostgreSQL (для Vault database config) |
-| `FREEIPA_ADMIN_PASSWORD` | `Secret123!` | Пароль admin FreeIPA |
+| `FREEIPA_ADMIN_PASSWORD` | `Secret123!` | Пароль admin LDAP |
 | `ROTATION_PERIOD` | `1h` | Период ротации static role в Vault |
 | `Vault__PollIntervalSeconds` | `15` | Интервал опроса Vault (сек) |
 | `Postgres__InsertIntervalSeconds` | `5` | Интервал INSERT (сек) |
+| `Resilience__VaultMaxRetryAttempts` | `3` | Retry при сбоях Vault |
+| `Resilience__PostgresMaxRetryAttempts` | `3` | Retry при transient-ошибках PostgreSQL |
 
-Расписание ротации задаётся в `scripts/vault-init.sh` через `ROTATION_PERIOD` (или `rotation_schedule` для cron-формата в Vault).
+## Устранение неполадок
+
+| Проблема | Решение |
+|----------|---------|
+| `vault` не стартует (`address already in use` на 8200) | Используется `entrypoint: ["vault"]` — образ HashiCorp по умолчанию добавляет dev-режим поверх config |
+| `postgres` падает на PostgreSQL 18 | Volume смонтирован в `/var/lib/postgresql` (требование PG 18+) |
+| Контейнеры не видят друг друга | Стек использует `network_mode: host` |
+| `vault-init` ждёт Vault | Healthcheck и curl используют `?sealedcode=200&uninitcode=200` |
 
 ## Остановка и очистка
 
@@ -170,8 +185,6 @@ docker compose down
 docker compose down -v
 ```
 
-> При переходе со старой версии (KV + rotator) необходимо `docker compose down -v` для пересоздания Vault и PostgreSQL.
-
 ## Безопасность (production)
 
 Это демонстрационный стек. Для production рекомендуется:
@@ -179,6 +192,7 @@ docker compose down -v
 - включить TLS для Vault, PostgreSQL и LDAP;
 - использовать Vault HA + auto-unseal (KMS/HSM);
 - заменить file storage Vault на integrated storage (Raft) в HA-режиме;
+- использовать bridge-сеть Docker вместо host network (на полноценных Docker-хостах);
+- заменить OpenLDAP на FreeIPA/Active Directory при наличии инфраструктуры;
 - ограничить AppRole политиками least-privilege;
-- настроить аудит Vault и PostgreSQL;
-- использовать отдельный privileged-аккаунт PostgreSQL только для Vault (не `app_tech`).
+- настроить аудит Vault и PostgreSQL.

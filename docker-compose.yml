@@ -1,37 +1,31 @@
 x-defaults: &restart-unless-stopped
   restart: unless-stopped
 
+x-host-network: &host-network
+  network_mode: host
+
 services:
-  freeipa:
-    <<: *restart-unless-stopped
-    image: quay.io/freeipa/freeipa-server:rocky-9
-    hostname: ipa.demo.local
-    container_name: freeipa
-    privileged: true
+  ldap:
+    <<: [*restart-unless-stopped, *host-network]
+    image: osixia/openldap:1.5.0
+    container_name: ldap
     environment:
-      PASSWORD: ${FREEIPA_ADMIN_PASSWORD:-Secret123!}
-      IPA_SERVER_IP: 172.28.0.10
-      DOMAIN: DEMO.LOCAL
-      REALM: DEMO.LOCAL
+      LDAP_ORGANISATION: Demo
+      LDAP_DOMAIN: demo.local
+      LDAP_ADMIN_PASSWORD: ${FREEIPA_ADMIN_PASSWORD:-Secret123!}
+      LDAP_TLS: "false"
     volumes:
-      - freeipa-data:/data
-    networks:
-      demo-net:
-        ipv4_address: 172.28.0.10
-    ports:
-      - "8389:389"
-      - "8643:636"
-      - "8080:80"
-      - "8443:443"
+      - ldap-data:/var/lib/ldap
+      - ldap-config:/etc/ldap/slapd.d
     healthcheck:
-      test: ["CMD-SHELL", "ldapsearch -x -H ldap://localhost:389 -b dc=demo,dc=local -s base '(objectclass=*)' >/dev/null 2>&1"]
-      interval: 30s
-      timeout: 10s
-      retries: 40
-      start_period: 300s
+      test: ["CMD-SHELL", "ldapsearch -x -H ldap://127.0.0.1:389 -b '' -s base '(objectclass=*)' namingContexts | grep -q 'dc=demo,dc=local'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   postgres:
-    <<: *restart-unless-stopped
+    <<: [*restart-unless-stopped, *host-network]
     image: postgres:18
     container_name: postgres
     environment:
@@ -39,55 +33,52 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres-admin-secret}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
-    networks:
-      demo-net:
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb -h 127.0.0.1"]
       interval: 5s
       timeout: 5s
       retries: 20
 
   vault:
-    <<: *restart-unless-stopped
+    <<: [*restart-unless-stopped, *host-network]
     image: hashicorp/vault:1.19
     container_name: vault
     cap_add:
       - IPC_LOCK
-    command: server -config=/vault/config/config.hcl
+    entrypoint: ["vault"]
+    command: ["server", "-config=/vault/config/config.hcl"]
     environment:
       VAULT_ADDR: http://127.0.0.1:8200
     volumes:
       - ./docker/vault/config.hcl:/vault/config/config.hcl:ro
       - vault-data:/vault/file
       - vault-init-data:/vault/init
-    networks:
-      demo-net:
-    ports:
-      - "8200:8200"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8200/v1/sys/health || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8200/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200' || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 30
 
   vault-init:
+    <<: *host-network
     build:
       context: .
       dockerfile: docker/vault/Dockerfile.init
     container_name: vault-init
     environment:
-      VAULT_ADDR: http://vault:8200
+      VAULT_ADDR: http://127.0.0.1:8200
       FREEIPA_ADMIN_PASSWORD: ${FREEIPA_ADMIN_PASSWORD:-Secret123!}
       POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres-admin-secret}
+      PGHOST: 127.0.0.1
       TECH_USER: app_tech
       STATIC_ROLE: app-tech
       ROTATION_PERIOD: 1h
+      LDAP_HOST: 127.0.0.1
     volumes:
       - ./docker/vault/policies:/vault/policies:ro
+      - ./docker/openldap/bootstrap:/bootstrap:ro
       - vault-init-data:/vault/init
       - vault-data:/vault/file
     depends_on:
@@ -95,25 +86,23 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      freeipa:
-        condition: service_healthy
-    networks:
-      demo-net:
+      ldap:
+        condition: service_started
     restart: "no"
 
   app:
-    <<: *restart-unless-stopped
+    <<: [*restart-unless-stopped, *host-network]
     build:
       context: ./src/PostgresVaultService
       dockerfile: Dockerfile
     container_name: postgres-vault-service
     entrypoint: ["/bin/sh", "/app/docker-entrypoint.sh"]
     environment:
-      Vault__Address: http://vault:8200
+      Vault__Address: http://127.0.0.1:8200
       Vault__DatabaseMountPoint: database
       Vault__StaticRoleName: app-tech
       Vault__PollIntervalSeconds: 15
-      Postgres__Host: postgres
+      Postgres__Host: 127.0.0.1
       Postgres__Port: 5432
       Postgres__Database: appdb
       Postgres__Username: app_tech
@@ -128,18 +117,10 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
-    networks:
-      demo-net:
-
-networks:
-  demo-net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/24
 
 volumes:
-  freeipa-data:
+  ldap-data:
+  ldap-config:
   postgres-data:
   vault-data:
   vault-init-data:
