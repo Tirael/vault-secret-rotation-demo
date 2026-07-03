@@ -1,10 +1,3 @@
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Options;
-using Polly;
-using Polly.Retry;
-using Polly.Timeout;
-using PostgresVaultService.Options;
-
 namespace PostgresVaultService.Resilience;
 
 public static class ResilienceServiceCollectionExtensions

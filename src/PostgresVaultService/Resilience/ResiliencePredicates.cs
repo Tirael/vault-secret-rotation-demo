@@ -1,9 +1,3 @@
-using Microsoft.Extensions.Options;
-using Npgsql;
-using Polly;
-using PostgresVaultService.Options;
-using VaultSharp.Core;
-
 namespace PostgresVaultService.Resilience;
 
 internal static class ResiliencePredicates

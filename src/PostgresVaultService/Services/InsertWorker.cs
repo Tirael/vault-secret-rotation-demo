@@ -1,9 +1,3 @@
-using Microsoft.Extensions.Options;
-using Polly;
-using Polly.Registry;
-using PostgresVaultService.Options;
-using PostgresVaultService.Resilience;
-
 namespace PostgresVaultService.Services;
 
 public sealed class InsertWorker : BackgroundService

@@ -59,7 +59,7 @@ flowchart LR
 ### Требования
 
 - Docker 24+ и Docker Compose v2
-- Linux-хост (стек использует `network_mode: host` для стабильной связности между контейнерами)
+- macOS, Linux или Windows (Docker Desktop) — стек использует bridge-сеть Docker
 - Порты на хосте: `389`, `5432`, `8200`
 
 ### Запуск
@@ -105,14 +105,14 @@ docker compose logs --tail=50 app
 
 Vault настроен на LDAP-аутентификацию через OpenLDAP:
 
-- **URL:** `ldap://127.0.0.1:389`
+- **URL:** `ldap://localhost:389`
 - **Домен:** `demo.local`
 - **Администратор:** `admin` / пароль из `FREEIPA_ADMIN_PASSWORD`
 
 Вход оператора в Vault через LDAP:
 
 ```bash
-export VAULT_ADDR=http://127.0.0.1:8200
+export VAULT_ADDR=http://localhost:8200
 docker compose exec vault vault login -method=ldap username=admin
 # пароль: значение FREEIPA_ADMIN_PASSWORD (по умолчанию Secret123!)
 ```
@@ -133,11 +133,11 @@ dotnet run --project src/PostgresVaultService
 Переменные окружения для локального запуска (после `docker compose up`):
 
 ```bash
-export Vault__Address=http://127.0.0.1:8200
+export Vault__Address=http://localhost:8200
 export Vault__StaticRoleName=app-tech
 export Vault__RoleId=$(docker compose exec vault cat /vault/init/app-role-id)
 export Vault__SecretId=$(docker compose exec vault cat /vault/init/app-secret-id)
-export Postgres__Host=127.0.0.1
+export Postgres__Host=localhost
 ```
 
 ## Структура проекта
@@ -174,7 +174,7 @@ export Postgres__Host=127.0.0.1
 |----------|---------|
 | `vault` не стартует (`address already in use` на 8200) | Используется `entrypoint: ["vault"]` — образ HashiCorp по умолчанию добавляет dev-режим поверх config |
 | `postgres` падает на PostgreSQL 18 | Volume смонтирован в `/var/lib/postgresql` (требование PG 18+) |
-| Контейнеры не видят друг друга | Стек использует `network_mode: host` |
+| Контейнеры не видят друг друга | Проверьте, что все сервисы в сети `demo-net` (`docker network inspect vault-secret-rotation-demo_demo-net`) |
 | `vault-init` ждёт Vault | Healthcheck и curl используют `?sealedcode=200&uninitcode=200` |
 
 ## Остановка и очистка
@@ -192,7 +192,7 @@ docker compose down -v
 - включить TLS для Vault, PostgreSQL и LDAP;
 - использовать Vault HA + auto-unseal (KMS/HSM);
 - заменить file storage Vault на integrated storage (Raft) в HA-режиме;
-- использовать bridge-сеть Docker вместо host network (на полноценных Docker-хостах);
+- использовать bridge-сеть Docker (по умолчанию в этом стеке) или dedicated overlay-сеть в оркестраторе;
 - заменить OpenLDAP на FreeIPA/Active Directory при наличии инфраструктуры;
 - ограничить AppRole политиками least-privilege;
 - настроить аудит Vault и PostgreSQL.

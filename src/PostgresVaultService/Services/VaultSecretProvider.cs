@@ -1,12 +1,3 @@
-using Microsoft.Extensions.Options;
-using Polly;
-using Polly.Registry;
-using PostgresVaultService.Models;
-using PostgresVaultService.Options;
-using PostgresVaultService.Resilience;
-using VaultSharp;
-using VaultSharp.V1.AuthMethods.AppRole;
-
 namespace PostgresVaultService.Services;
 
 public sealed class VaultSecretProvider : IVaultSecretProvider

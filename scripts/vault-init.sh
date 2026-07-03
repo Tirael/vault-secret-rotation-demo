@@ -75,7 +75,7 @@ configure_vault() {
     plugin_name=postgresql-database-plugin \
     allowed_roles="*" \
     verify_connection=true \
-    connection_url="postgresql://{{username}}:{{password}}@${PGHOST:-127.0.0.1}:5432/postgres?sslmode=disable" \
+    connection_url="postgresql://{{username}}:{{password}}@${PGHOST:-postgres}:5432/postgres?sslmode=disable" \
     username="postgres" \
     password="${POSTGRES_ADMIN_PASSWORD}"
 

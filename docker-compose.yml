@@ -1,12 +1,9 @@
 x-defaults: &restart-unless-stopped
   restart: unless-stopped
 
-x-host-network: &host-network
-  network_mode: host
-
 services:
   ldap:
-    <<: [*restart-unless-stopped, *host-network]
+    <<: *restart-unless-stopped
     image: osixia/openldap:1.5.0
     container_name: ldap
     environment:
@@ -14,9 +11,13 @@ services:
       LDAP_DOMAIN: demo.local
       LDAP_ADMIN_PASSWORD: ${FREEIPA_ADMIN_PASSWORD:-Secret123!}
       LDAP_TLS: "false"
+    ports:
+      - "389:389"
     volumes:
       - ldap-data:/var/lib/ldap
       - ldap-config:/etc/ldap/slapd.d
+    networks:
+      - demo-net
     healthcheck:
       test: ["CMD-SHELL", "ldapsearch -x -H ldap://127.0.0.1:389 -b '' -s base '(objectclass=*)' namingContexts | grep -q 'dc=demo,dc=local'"]
       interval: 10s
@@ -25,16 +26,20 @@ services:
       start_period: 20s
 
   postgres:
-    <<: [*restart-unless-stopped, *host-network]
+    <<: *restart-unless-stopped
     image: postgres:18
     container_name: postgres
     environment:
       POSTGRES_DB: appdb
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres-admin-secret}
+    ports:
+      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - demo-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d appdb -h 127.0.0.1"]
       interval: 5s
@@ -42,7 +47,7 @@ services:
       retries: 20
 
   vault:
-    <<: [*restart-unless-stopped, *host-network]
+    <<: *restart-unless-stopped
     image: hashicorp/vault:1.19
     container_name: vault
     cap_add:
@@ -51,10 +56,14 @@ services:
     command: ["server", "-config=/vault/config/config.hcl"]
     environment:
       VAULT_ADDR: http://127.0.0.1:8200
+    ports:
+      - "8200:8200"
     volumes:
       - ./docker/vault/config.hcl:/vault/config/config.hcl:ro
       - vault-data:/vault/file
       - vault-init-data:/vault/init
+    networks:
+      - demo-net
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8200/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200' || exit 1"]
       interval: 5s
@@ -62,25 +71,26 @@ services:
       retries: 30
 
   vault-init:
-    <<: *host-network
     build:
       context: .
       dockerfile: docker/vault/Dockerfile.init
     container_name: vault-init
     environment:
-      VAULT_ADDR: http://127.0.0.1:8200
+      VAULT_ADDR: http://vault:8200
       FREEIPA_ADMIN_PASSWORD: ${FREEIPA_ADMIN_PASSWORD:-Secret123!}
       POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres-admin-secret}
-      PGHOST: 127.0.0.1
+      PGHOST: postgres
       TECH_USER: app_tech
       STATIC_ROLE: app-tech
       ROTATION_PERIOD: 1h
-      LDAP_HOST: 127.0.0.1
+      LDAP_HOST: ldap
     volumes:
       - ./docker/vault/policies:/vault/policies:ro
       - ./docker/openldap/bootstrap:/bootstrap:ro
       - vault-init-data:/vault/init
       - vault-data:/vault/file
+    networks:
+      - demo-net
     depends_on:
       vault:
         condition: service_healthy
@@ -91,18 +101,18 @@ services:
     restart: "no"
 
   app:
-    <<: [*restart-unless-stopped, *host-network]
+    <<: *restart-unless-stopped
     build:
-      context: ./src/PostgresVaultService
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: src/PostgresVaultService/Dockerfile
     container_name: postgres-vault-service
     entrypoint: ["/bin/sh", "/app/docker-entrypoint.sh"]
     environment:
-      Vault__Address: http://127.0.0.1:8200
+      Vault__Address: http://vault:8200
       Vault__DatabaseMountPoint: database
       Vault__StaticRoleName: app-tech
       Vault__PollIntervalSeconds: 15
-      Postgres__Host: 127.0.0.1
+      Postgres__Host: postgres
       Postgres__Port: 5432
       Postgres__Database: appdb
       Postgres__Username: app_tech
@@ -112,11 +122,17 @@ services:
     volumes:
       - vault-init-data:/vault/init:ro
       - ./docker/app-entrypoint.sh:/app/docker-entrypoint.sh:ro
+    networks:
+      - demo-net
     depends_on:
       vault-init:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+
+networks:
+  demo-net:
+    driver: bridge
 
 volumes:
   ldap-data:

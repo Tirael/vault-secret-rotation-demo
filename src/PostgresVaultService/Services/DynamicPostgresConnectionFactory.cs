@@ -1,11 +1,3 @@
-using Microsoft.Extensions.Options;
-using Npgsql;
-using Polly;
-using Polly.Registry;
-using PostgresVaultService.Models;
-using PostgresVaultService.Options;
-using PostgresVaultService.Resilience;
-
 namespace PostgresVaultService.Services;
 
 public sealed class DynamicPostgresConnectionFactory : IHostedService, IDisposable
